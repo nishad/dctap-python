@@ -1,153 +1,156 @@
 """Default settings."""
 
-import re
 import sys
 from dataclasses import asdict
 from pathlib import Path
-
-# pylint: disable=consider-using-from-import
-import ruamel.yaml as yaml
-from .defaults import (
-    DEFAULT_CONFIGFILE_NAME,
-    DEFAULT_HIDDEN_CONFIGFILE_NAME,
-    DEFAULT_CONFIG_YAML,
-)
-from .exceptions import ConfigError
-from .tapclasses import TAPShape, TAPStatementTemplate
-
-
-def get_shems(shape_class=TAPShape, settings=None):
-    """List DCTAP elements supported by given shape class."""
-    only_shape_elements = list(asdict(shape_class()))
-    only_shape_elements.remove("state_list")
-    only_shape_elements.remove("shape_warns")
-    only_shape_elements.remove("shape_extras")
-    extra_shape_elements = []
-    if settings:
-        if settings.get("extra_shape_elements"):
-            for extra_element in settings.get("extra_shape_elements"):
-                extra_shape_elements.append(extra_element)
-    return (only_shape_elements, extra_shape_elements)
-
-
-def get_stems(statement_template_class=TAPStatementTemplate, settings=None):
-    """List DCTAP elements supported by statement template class."""
-    only_st_elements = list(asdict(statement_template_class()))
-    only_st_elements.remove("state_warns")
-    only_st_elements.remove("state_extras")
-    extra_st_elements = []
-    if settings:
-        if settings.get("extra_statement_template_elements"):
-            for extra_element in settings.get("extra_statement_template_elements"):
-                extra_st_elements.append(extra_element)
-    return (only_st_elements, extra_st_elements)
-
-
-def write_configfile(
-    configfile_name=DEFAULT_CONFIGFILE_NAME,
-    config_yamldoc=DEFAULT_CONFIG_YAML,
-    terse=False,
-):
-    """Write initial config file, by default to CWD, or exit if already exists."""
-    if terse:
-        config_yamldoc = '\n'.join( # remove lines starting with more than one '#'
-            [ln for ln in config_yamldoc.splitlines() if not re.match("^##", ln)]
-        )
-        config_yamldoc = '\n'.join( # remove lines that consist only of whitespace
-            [ln.rstrip() for ln in config_yamldoc.splitlines() if ln.rstrip()]
-        )
-    if Path(configfile_name).exists():
-        raise ConfigError(f"{repr(configfile_name)} exists - will not overwrite.")
-    try:
-        with open(configfile_name, "w", encoding="utf-8") as outfile:
-            outfile.write(config_yamldoc)
-            print(
-                f"Built-in settings written to {str(configfile_name)} for editing.",
-                file=sys.stderr,
-            )
-    except FileNotFoundError as error:
-        raise ConfigError(f"{repr(configfile_name)} not writeable.") from error
+from dctap.defaults import CONFIGFILE, CONFIGYAML
+from dctap.exceptions import ConfigError
+from dctap.tapclasses import TAPShape, TAPStatementTemplate
+from dctap.utils import load_yaml_to_dict, coerce_concise
 
 
 def get_config(
-    configfile_name=None,
-    config_yamldoc=DEFAULT_CONFIG_YAML,
-    shape_class=TAPShape,
-    statement_template_class=TAPStatementTemplate,
+    nondefault_configyaml_str=None,
+    nondefault_configfile_name=None,
+    default_configyaml_str=CONFIGYAML,
+    default_configfile_name=CONFIGFILE,
+    default_shape_class=TAPShape,
+    default_state_class=TAPStatementTemplate,
 ):
-    """
-    Get built-in settings then override from config file (if found).
-    - Note: extra element aliases added to defaults.
-    """
+    """Get configuration dictionary from package defaults (or from non-defaults)."""
+    # pylint: disable=too-many-arguments
+    yamlstring = None
+    configdict_from_yamlstring = None
+    config_dict = _initialize_config_dict(default_shape_class, default_state_class)
 
-    def load2dict(configfile=None):
-        """Parse contents of YAML configfile and return dictionary."""
-        bad_form = f"{repr(configfile)} is badly formed: fix, re-generate, or delete."
-        config_yaml = Path(configfile).read_text(encoding='UTF-8')
+    if nondefault_configfile_name and nondefault_configyaml_str:
+        raise ConfigError("Can load YAML from either string or file, not both.")
+
+    if nondefault_configfile_name:
+        nondefault_configfile = Path(nondefault_configfile_name)
         try:
-            config_read_from_file = yaml.safe_load(config_yaml)
-        except (yaml.YAMLError, yaml.scanner.ScannerError) as error:
-            raise ConfigError(bad_form) from error
+            yamlstring = nondefault_configfile.read_text(encoding="utf-8")
+        except FileNotFoundError as err:
+            message = f"Config file '{nondefault_configfile_name}' not found."
+            raise ConfigError(message) from err
+        configdict_from_yamlstring = load_yaml_to_dict(yamlstring=yamlstring)
+        if configdict_from_yamlstring is not None:
+            config_dict.update(configdict_from_yamlstring)
+        config_dict = _add_extra_element_aliases(config_dict)
+        config_dict = _add_colons_to_prefixes_if_needed(config_dict)
+        return config_dict
 
-        if config_read_from_file:
-            return config_read_from_file
-        return {}
+    if nondefault_configyaml_str:
+        configdict_from_yamlstring = load_yaml_to_dict(
+            yamlstring=nondefault_configyaml_str
+        )
+        if configdict_from_yamlstring is not None:
+            if not configdict_from_yamlstring.get("default_shape_identifier"):
+                configdict_from_yamlstring["default_shape_identifier"] = "default"
+            config_dict.update(configdict_from_yamlstring)
+        config_dict = _add_extra_element_aliases(config_dict)
+        config_dict = _add_colons_to_prefixes_if_needed(config_dict)
+        return config_dict
 
-    elements_dict = {}
-    elements_dict["shape_elements"] = get_shems(shape_class)[0]
-    elements_dict["statement_template_elements"] = get_stems(
-        statement_template_class
-    )[0]
-    elements_dict["csv_elements"] = (
-        elements_dict["shape_elements"] + elements_dict["statement_template_elements"]
-    )
+    try:
+        yamlstring = Path(default_configfile_name).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        yamlstring = default_configyaml_str
+    configdict_from_yamlstring = load_yaml_to_dict(yamlstring=yamlstring)
+    if configdict_from_yamlstring is not None:
+        config_dict.update(configdict_from_yamlstring)
+    config_dict = _add_extra_element_aliases(config_dict)
+    config_dict = _add_colons_to_prefixes_if_needed(config_dict)
+    return config_dict
 
+
+def _add_extra_element_aliases(config_dict):
+    """If extra element aliases are specified, add them to the configuration dict."""
+    extras = config_dict.get("extra_element_aliases")
+    if extras:
+        try:
+            extras = {coerce_concise(str(k).lower()): v for (k, v) in extras.items()}
+        except AttributeError:
+            extras = {}
+        config_dict["element_aliases"].update(extras)
+    return config_dict
+
+
+def _add_colons_to_prefixes_if_needed(config_dict):
+    """Reconstitute config_dict.prefixes, ensuring that each prefix ends in colon."""
+    prefixes = config_dict.get("prefixes")
+    new_prefixes = {}
+    if prefixes:
+        for prefix in prefixes:
+            if not prefix.endswith(":"):
+                new_prefixes[prefix + ":"] = prefixes[prefix]
+            else:
+                new_prefixes[prefix] = prefixes[prefix]
+    config_dict["prefixes"] = new_prefixes
+    return config_dict
+
+
+def _get_shems(shape):
+    """List TAP elements supported by given shape class."""
+    main_shems = list(asdict(shape()))
+    main_shems.remove("state_list")
+    main_shems.remove("shape_warns")
+    main_shems.remove("shape_extras")
+    return main_shems
+
+
+def _get_stems(state):
+    """List TAP elements supported by given statement template class."""
+    main_stems = list(asdict(state()))
+    main_stems.remove("state_warns")
+    main_stems.remove("state_extras")
+    return main_stems
+
+
+def _initialize_config_dict(shapeclass, stateclass):
+    """Initialize config dict with element lists (computed) and placeholder keys."""
     config_dict = {}
+    ems_dict = {}
+    shems = ems_dict["shape_elements"] = _get_shems(shapeclass)
+    stems = ems_dict["statement_template_elements"] = _get_stems(stateclass)
+    ems_dict["csv_elements"] = shems + stems
     config_dict["element_aliases"] = {}
-    config_dict["element_aliases"].update(
-        _alias2element_mappings(elements_dict["csv_elements"])
-    )
+    config_dict["element_aliases"].update(_get_aliases_dict(ems_dict["csv_elements"]))
     config_dict["default_shape_identifier"] = "default"
     config_dict["prefixes"] = {}
     config_dict["extra_shape_elements"] = []
     config_dict["extra_statement_template_elements"] = []
-    config_dict["list_elements"] = []
-    config_dict["list_item_separator"] = " "
+    config_dict["picklist_elements"] = []
+    config_dict["picklist_item_separator"] = " "
     config_dict["extra_value_node_types"] = []
     config_dict["extra_element_aliases"] = {}
-
-    config_dict.update(elements_dict)
-    if yaml.safe_load(config_yamldoc):
-        config_dict.update(yaml.safe_load(config_yamldoc))
-
-    config_dict_from_file = {}
-    if configfile_name:
-        try:
-            config_dict_from_file.update(load2dict(configfile_name))
-        except FileNotFoundError as error:
-            raise ConfigError(f"{repr(configfile_name)} not found.") from error
-    elif Path(DEFAULT_CONFIGFILE_NAME).exists():
-        config_dict_from_file.update(load2dict(DEFAULT_CONFIGFILE_NAME))
-    elif Path(DEFAULT_HIDDEN_CONFIGFILE_NAME).exists():
-        config_dict_from_file.update(load2dict(DEFAULT_HIDDEN_CONFIGFILE_NAME))
-
-    # Settings from config file may override defaults.
-    config_dict.update(config_dict_from_file)
-
-    # But extra element aliases, if declared, are added to element aliases.
-    if config_dict_from_file.get("extra_element_aliases"):
-        config_dict["element_aliases"] = dict(
-            config_dict["element_aliases"],
-            *config_dict_from_file["extra_element_aliases"]
-        )
-
+    config_dict.update(ems_dict)
     return config_dict
 
 
-def _alias2element_mappings(csv_elements_list=None):
-    """Compute shortkey/lowerkey-to-element mappings from list of CSV elements."""
-    alias2element_mappings = {}
+def write_configfile(
+    nondefault_configyaml_str=None,
+    default_configfile_name=CONFIGFILE,
+    default_configyaml_str=CONFIGYAML,
+):
+    """Write initial config file or exit trying."""
+    if Path(default_configfile_name).exists():
+        raise ConfigError(f"'{default_configfile_name}' exists - will not overwrite.")
+    if nondefault_configyaml_str:  # useful for testing
+        default_configyaml_str = nondefault_configyaml_str
+    try:
+        with open(default_configfile_name, "w", encoding="utf-8") as outfile:
+            outfile.write(default_configyaml_str)
+            print(f"Settings written to '{default_configfile_name}'.", file=sys.stderr)
+    except FileNotFoundError as error:
+        raise ConfigError(f"'{default_configfile_name}' not writeable.") from error
+
+
+def _get_aliases_dict(csv_elements_list=None):
+    """Short/lowerkey-to-element dict from CSV elements, minus privates."""
+    aliases_to_elements = {}
     for csv_elem in csv_elements_list:
-        lowerkey = csv_elem.lower()
-        alias2element_mappings[lowerkey] = csv_elem  # { lowerkey: camelcasedValue }
-    return alias2element_mappings
+        if csv_elem[0] != "_":
+            lowerkey = csv_elem.lower()
+            aliases_to_elements[lowerkey] = csv_elem  # { foobar: fooBar }
+    return aliases_to_elements

@@ -1,108 +1,228 @@
-"""Parse DCTAP/CSV, return two-item tuple: (list of shape objects, list of warnings)."""
+"""Parse TAP, return two-item tuple: (list of shape objects, list of warnings)."""
 
+import re
 from collections import defaultdict
 from csv import DictReader
 from io import StringIO as StringBuffer
 from dataclasses import asdict
-from dctap.config import get_shems, get_stems
-from dctap.exceptions import DctapError
+from dctap.exceptions import DctapError, NoDataError
 from dctap.tapclasses import TAPShape, TAPStatementTemplate
+from dctap.utils import coerce_concise
 
 
-def csvreader(open_csvfile_obj, config_dict):
-    """From open CSV file object, return tuple: (shapes dict, warnings dict)."""
-    (csvrows, csvwarns) = _get_rows(open_csvfile_obj, config_dict)
-    (tapshapes, tapwarns) = _get_tapshapes(csvrows, config_dict)
+def csvreader(
+    csvfile_str=None,
+    config_dict=None,
+    open_csvfile_obj=None,
+    shape_class=TAPShape,
+    state_class=TAPStatementTemplate,
+):
+    """From open CSV file object, return shapes dict."""
+    if csvfile_str:
+        (csvrows, csvwarns) = _get_rows(
+            csvfile_str=csvfile_str,
+            config_dict=config_dict,
+        )
+    elif open_csvfile_obj:
+        (csvrows, csvwarns) = _get_rows(
+            open_csvfile_obj=open_csvfile_obj,
+            config_dict=config_dict,
+        )
+    else:
+        raise DctapError("No data provided.")
+
+    (tapshapes, tapwarns) = _get_tapshapes(
+        rows=csvrows,
+        config_dict=config_dict,
+        shape_class=shape_class,
+        state_class=state_class,
+    )
     tapwarns = {**csvwarns, **tapwarns}
-    return (tapshapes, tapwarns)
+    prefixes_used = _get_prefixes_actually_used(csvrows)
+    tapshapes = _add_namespaces(tapshapes, config_dict, prefixes_used)
+    tapshapes = _add_tapwarns(tapshapes, tapwarns)
+    return tapshapes
 
 
-def _get_tapshapes(rows, config_dict):
+def _add_namespaces(tapshapes=None, config_dict=None, prefixes_used=None):
+    """Adds key 'namespaces' to tapshapes dict."""
+    tapshapes["namespaces"] = {}
+    if config_dict.get("prefixes"):
+        for prefix in prefixes_used:
+            if config_dict["prefixes"].get(prefix):
+                tapshapes["namespaces"][prefix] = config_dict["prefixes"].get(prefix)
+    return tapshapes
+
+
+def _add_tapwarns(tapshapes=None, tapwarns=None):
+    """Adds key 'warnings' to tapshapes dict."""
+    tapshapes["warnings"] = tapwarns
+    return tapshapes
+
+
+def _get_prefixes_actually_used(csvrows):
+    """List strings before colons in values of elements that could take URI prefixes."""
+    prefixes = set()
+    for row in csvrows:
+        for element in [
+            "shapeID",
+            "propertyID",
+            "valueDataType",
+            "valueShape",
+        ]:
+            if row.get(element):
+                prefix_plus_uri_pair = re.match(r"([^:]*):", row.get(element))
+                if prefix_plus_uri_pair:  # if there is at least one
+                    prefix_as_provided = prefix_plus_uri_pair.group(0)
+                    prefixes.add(prefix_as_provided)
+        if row.get("valueConstraint"):
+            pattern = r"\b\w+:"
+            used_in_valueconstraint = re.findall(pattern, row.get("valueConstraint"))
+            prefixes = set(list(prefixes) + list(used_in_valueconstraint))
+    return list(prefixes)
+
+
+def _get_rows(
+    csvfile_str=None,
+    config_dict=None,
+    open_csvfile_obj=None,
+):
+    """Extract from _io.TextIOWrapper object a list of CSV file rows as dicts."""
+    # pylint: disable=too-many-locals
+    # pylint: disable=too-many-branches
+    if csvfile_str:
+        csvfile_contents_str = csvfile_str
+    elif open_csvfile_obj:
+        csvfile_contents_str = open_csvfile_obj.read()
+    else:
+        raise NoDataError("No data to process.")
+
+    tmp_buffer = StringBuffer(csvfile_contents_str)
+    csvlines_stripped = [line.strip() for line in tmp_buffer]
+    csvlines_stripped = [
+        line for line in csvlines_stripped if not re.match("#", line.strip())
+    ]
+    if len(csvlines_stripped) < 2:
+        raise NoDataError("No data to process.")
+    raw_header_line_list = csvlines_stripped[0].split(",")
+    new_header_line_list = []
+
+    recognized_elements = config_dict.get("csv_elements")
+    xtra_shems = config_dict.get("extra_shape_elements")
+    xtra_stems = config_dict.get("extra_statement_template_elements")
+    if xtra_shems:
+        recognized_elements.extend(xtra_shems)
+        for element in xtra_shems:
+            config_dict["element_aliases"][element.lower()] = element
+    if xtra_stems:
+        recognized_elements.extend(xtra_stems)
+        for element in xtra_stems:
+            config_dict["element_aliases"][element.lower()] = element
+    recognized_elements = [elem.lower() for elem in recognized_elements]
+
+    for column in raw_header_line_list:
+        column = coerce_concise(column)
+        column = _normalize_element_name(column, config_dict.get("element_aliases"))
+        new_header_line_list.append(column)
+
+    csv_warns = defaultdict(dict)
+    for column in new_header_line_list:
+        if column.lower() not in recognized_elements:
+            warn = f"Non-DCTAP element '{column}' not configured as extra element."
+            csv_warns["csv"] = {}
+            csv_warns["csv"]["column"] = []
+            csv_warns["csv"]["column"].append(warn)
+
+    new_header_line_str = ",".join(new_header_line_list)
+    csvlines_stripped[0] = new_header_line_str
+    if not csvlines_stripped[0]:
+        raise NoDataError("No data to process.")
+    if "propertyID" not in csvlines_stripped[0]:
+        raise DctapError("Valid DCTAP CSV must have a 'propertyID' column.")
+
+    tmp_buffer2 = StringBuffer("".join([line + "\n" for line in csvlines_stripped]))
+    csv_rows = list(DictReader(tmp_buffer2))
+    for row in csv_rows:
+        for key, value in row.items():
+            if isinstance(value, str):  # ignore if instance of NoneType or list
+                row[key] = value.strip()
+    csv_warns = dict(csv_warns)
+    return (csv_rows, csv_warns)
+
+
+def _get_tapshapes(rows=None, config_dict=None, shape_class=None, state_class=None):
     """Return tuple: (shapes dict, warnings dict)."""
     # pylint: disable=too-many-locals
     # pylint: disable=too-many-branches
     # pylint: disable=too-many-statements
 
-    try:
-        dshape = config_dict.get("default_shape_identifier")
-    except KeyError:
-        dshape = "default"
-
-    (main_stems, xtra_stems) = get_stems(TAPStatementTemplate, config_dict)
-
-    # fmt: off
-    shapes = {}                             # Dict for shapeID-to-TAPShape_list.
-    warns = defaultdict(dict)               # Dict for shapeID-to-warnings_list.
+    default_shape_id = config_dict["default_shape_identifier"]
+    main_stems = config_dict.get("statement_template_elements")
+    xtra_stems = config_dict.get("extra_statement_template_elements")
+    shapes = {}  # dict for shapeID-to-TAPShape_list
+    warns = defaultdict(dict)  # dict for shapeID-to-warnings_list
 
     for row in rows:
-        sh_id = ""
+        shape_id = ""
         if row.get("propertyID"):
             if row.get("shapeID"):
-                sh_id = row.get("shapeID")
+                shape_id = row.get("shapeID")
             elif not row.get("shapeID"):
                 try:
-                    sh_id = list(shapes)[-1]
+                    shape_id = list(shapes)[-1]
                 except IndexError:
-                    sh_id = row["shapeID"] = dshape
+                    shape_id = row["shapeID"] = default_shape_id
         elif row.get("shapeID"):
-            sh_id = row.get("shapeID")
+            shape_id = row.get("shapeID")
 
-        if sh_id:
-            if sh_id not in list(shapes):
-                sh_obj = _mkshape(row, config_dict)
-                sh_obj.normalize(config_dict)
-                shapes[sh_id] = sh_obj
-                warns[sh_id] = {}
+        if shape_id:
+            if shape_id not in list(shapes):
+                shape_obj = _make_shape(
+                    row_dict=row,
+                    config_dict=config_dict,
+                    shape_class=shape_class,
+                )
+                shape_obj.normalize(config_dict)
+                shapes[shape_id] = shape_obj
+                warns[shape_id] = {}
 
-            sh_warns = sh_obj.get_warnings()
-            for (elem, warn) in sh_warns.items():
+            shape_warnings = shape_obj.get_warnings()
+            for (elem, warn) in shape_warnings.items():
                 try:
-                    warns[sh_id][elem].append(warn)
+                    warns[shape_id][elem].append(warn)
                 except KeyError:
-                    warns[sh_id][elem] = []
-                    warns[sh_id][elem].append(warn)
+                    warns[shape_id][elem] = []
+                    warns[shape_id][elem].append(warn)
 
         if not row.get("propertyID"):
             continue
 
-        st = TAPStatementTemplate()
+        state_class_obj = state_class()
         for col in row:
             if col in main_stems:
-                setattr(st, col, row[col])
+                setattr(state_class_obj, col, row[col])
             elif col in xtra_stems:
-                st.state_extras[col] = row[col]
+                state_class_obj.state_extras[col] = row[col]
 
-        st.normalize(config_dict)
-        shapes[sh_id].state_list.append(st)
-        st_warns = st.get_warnings()
-
-        for (elem, warn) in st_warns.items():
-            try:
-                warns[sh_id][elem].append(warn)
-            except KeyError:
-                warns[sh_id][elem] = []
-                warns[sh_id][elem].append(warn)
+        state_class_obj.normalize(config_dict)
+        shapes[shape_id].state_list.append(state_class_obj)
 
         warns_dict = dict(warns)
         shapes_dict = {}
-        list_of_shapes = []
-        shapes_dict["shapes"] = list_of_shapes
+        shapes_dict["shapes"] = []
 
-        for sh_obj in list(shapes.values()):
-            sh_dict = asdict(sh_obj)
-            sh_dict[
-                "statement_templates"
-            ] = sh_dict.pop("state_list")
-            list_of_shapes.append(sh_dict)
+        for shape_obj in list(shapes.values()):
+            sh_dict = asdict(shape_obj)
+            sh_dict["statement_templates"] = sh_dict.pop("state_list")
+            shapes_dict["shapes"].append(sh_dict)
 
         shapes_dict = _simplify(shapes_dict)
 
     return (shapes_dict, warns_dict)
-    # fmt: on
 
 
-def _mkshape(row_dict=None, config_dict=None):
-    """Populates shape fields of dataclass TAPShape object from dict for one row.
+def _make_shape(row_dict=None, config_dict=None, shape_class=None):
+    """Populates shape fields of dataclass shape object from dict for one row.
 
     Args:
         row_dict: Dictionary of all columns headers (keys) and cell values (values)
@@ -111,12 +231,12 @@ def _mkshape(row_dict=None, config_dict=None):
         config_dict: Dictionary of settings, built-in or as read from config file.
 
     Returns:
-        Unpopulated instance of dctap.tapclasses.TAPShape, by default:
-        - TAPShape(shapeID='', shapeLabel='', state_list=[], shape_warns={}, state_extras={})
-        - Plus extra TAPShape fields as per config settings.
+        Unpopulated instance of shape class, for example:
+        TAPShape(shapeID='', state_list=[], shape_warns={}, state_extras={}, ...)
     """
-    (main_shems, xtra_shems) = get_shems(shape_class=TAPShape, settings=config_dict)
-    tapshape_obj = TAPShape()
+    main_shems = config_dict.get("shape_elements")
+    xtra_shems = config_dict.get("extra_shape_elements")
+    tapshape_obj = shape_class()
     for key in row_dict:
         if key in main_shems:
             setattr(tapshape_obj, key, row_dict[key])
@@ -125,26 +245,9 @@ def _mkshape(row_dict=None, config_dict=None):
     return tapshape_obj
 
 
-def _lowercase_despace_depunctuate(some_str=None):
-    """
-    For given string:
-    - delete spaces, underscores, dashes, commas
-    - lowercase
-    - delete surrounding single and double quotes
-    """
-    some_str = some_str.replace(" ", "")
-    some_str = some_str.replace("_", "")
-    some_str = some_str.replace("-", "")
-    some_str = some_str.replace(",", "")
-    some_str = some_str.lower()
-    some_str = some_str.strip('"')
-    some_str = some_str.strip("'")
-    return some_str
-
-
 def _normalize_element_name(some_str, element_aliases_dict=None):
-    """Normalize a given element string, if recognized; if not, leave unchanged)."""
-    some_str = _lowercase_despace_depunctuate(some_str)
+    """Given header string, return converted if aliased, else return unchanged."""
+    some_str = coerce_concise(some_str)
     if element_aliases_dict:
         for key in element_aliases_dict.keys():
             if key == some_str:
@@ -173,47 +276,3 @@ def _simplify(shapes_dict):
         for empty_element in [key for key in shape if not shape[key]]:
             del shape[empty_element]
     return shapes_dict
-
-
-def _get_rows(open_csvfile_obj, config_dict):
-    """Extract from _io.TextIOWrapper object a list of CSV file rows as dicts."""
-    # pylint: disable=too-many-locals
-    csvfile_contents_str = open_csvfile_obj.read()
-    tmp_buffer = StringBuffer(csvfile_contents_str)
-    csvlines_stripped = [line.strip() for line in tmp_buffer]
-    raw_header_line_list = csvlines_stripped[0].split(",")
-    new_header_line_list = []
-
-    recognized_elements = config_dict.get("csv_elements")
-    xtra_shems = config_dict.get("extra_shape_elements")
-    xtra_stems = config_dict.get("extra_statement_template_elements")
-    if xtra_shems:
-        recognized_elements.extend(xtra_shems)
-        for element in xtra_shems:
-            config_dict["element_aliases"][element.lower()] = element
-    if xtra_stems:
-        recognized_elements.extend(xtra_stems)
-        for element in xtra_stems:
-            config_dict["element_aliases"][element.lower()] = element
-    recognized_elements = [elem.lower() for elem in recognized_elements]
-
-    for column in raw_header_line_list:
-        column = _lowercase_despace_depunctuate(column)
-        column = _normalize_element_name(column, config_dict.get("element_aliases"))
-        new_header_line_list.append(column)
-    csv_warns = defaultdict(dict)
-
-    for column in new_header_line_list:
-        if column.lower() not in recognized_elements:
-            warn = f"Non-DCTAP element {repr(column)} not configured as extra element."
-            csv_warns["csv"] = {}
-            csv_warns["csv"]["column"] = []
-            csv_warns["csv"]["column"].append(warn)
-    new_header_line_str = ",".join(new_header_line_list)
-    csvlines_stripped[0] = new_header_line_str
-    if "propertyID" not in csvlines_stripped[0]:
-        raise DctapError("Valid DCTAP CSV must have a 'propertyID' column.")
-    tmp_buffer2 = StringBuffer("".join([line + "\n" for line in csvlines_stripped]))
-    csv_rows = list(DictReader(tmp_buffer2))
-    csv_warns = dict(csv_warns)
-    return (csv_rows, csv_warns)

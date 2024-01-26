@@ -1,7 +1,7 @@
 dctap-python
 ============
 
-Basic validation of a DCTAP instance.
+Normalize and serialize a Tabular Application Profile.
 
 |Tests Badge| |Docs Badge| |Black Badge|
 
@@ -51,9 +51,9 @@ For developers who work alot with Python projects, it is good practice to create
 
 .. code-block:: bash
     
-    some_directory$ python3 -m venv .venv
-    some_directory$ source .venv/bin/activate
-    some_directory$ python3 -m pip install -U https://github.com/dcmi/dctap-python/archive/main.zip
+    $ python3 -m venv .venv
+    $ source .venv/bin/activate
+    $ python3 -m pip install -U https://github.com/dcmi/dctap-python/archive/main.zip
 
 Note that "dctap" will pip-install even without creating and activating a virtual environment, even though this is not considered good practice. If you do install it into a virtual environment, note that the virtual environment must be activated with `source .venv/bin/activate` or "dctap" will not work. The activation of a virtual environment can be automated by adding this command to a shell profile where it will be executed when starting the shell, for example by adding the lines to the file "~/.bash_profile":
 
@@ -71,10 +71,10 @@ Cloning the "dctap-python" repository to your machine and installing it from the
 
     $ git clone https://github.com/dcmi/dctap-python.git
     $ cd dctap-python
-    dctap-python$ python -m venv .venv
-    dctap-python$ source .venv/bin/activate
-    dctap-python$ python3 -m pip install flit Pygments
-    dctap-python$ flit install -s
+    $ python -m venv .venv
+    $ source .venv/bin/activate
+    $ python3 -m pip install flit Pygments
+    $ flit install -s
 
 Quick start
 -----------
@@ -90,11 +90,11 @@ Run without arguments, "dctap" shows what options and commands are available.
 
       Examples:
 
-      $ dctap generate my_profile.csv
-      $ dctap generate --json my_profile.csv
-      $ dctap generate --expand-prefixes my_profile.csv
-      $ dctap generate --warnings my_profile.csv
-      $ dctap generate --warnings --expand-prefixes --json my_profile.csv
+      $ dctap read my_profile.csv
+      $ dctap read --json my_profile.csv
+      $ dctap read --expand-prefixes my_profile.csv
+      $ dctap read --warnings my_profile.csv
+      $ dctap read --warnings --expand-prefixes --json my_profile.csv
       $ dctap init
       Built-in settings written to dctap.yml - edit as needed.
       $ dctap init /Users/tbaker/dctap.yml

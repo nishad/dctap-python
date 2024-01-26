@@ -4,6 +4,7 @@ import pytest
 from dctap.config import get_config
 from dctap.csvreader import _normalize_element_name
 
+
 def test_normalize_element_name():
     """Element names not recognized as aliases are left unchanged."""
     config_dict = get_config()
@@ -14,15 +15,23 @@ def test_normalize_element_name():
 
 def test_normalize_element_name_customized():
     """Uses customized element name aliases taken from configuration file."""
-    element_aliases_dict = { 
-        'propertyid': 'propertyID',  
-        'eigenschaftsidentifikator': 'propertyID',  
+    element_aliases_dict = {
+        "propertyid": "propertyID",
+        "eigenschaftsidentifikator": "propertyID",
     }
     assert _normalize_element_name("propertyid", element_aliases_dict) == "propertyID"
-    assert _normalize_element_name("eigenschaftsidentifikator", element_aliases_dict) == "propertyID"
+    assert (
+        _normalize_element_name("eigenschaftsidentifikator", element_aliases_dict)
+        == "propertyID"
+    )
 
 def test_normalize_element_name_if_element_aliases_dict_pass_through_unchanged():
-    """Pass through element name unchanged when function not passed element aliases dict.
-    Normally, this should not happen because these are computed and configurable."""
+    """
+    If no element aliases dict passed to function, pass element name through unchanged.
+    Normally, this should not happen because these are computed and configurable.
+    """
     assert _normalize_element_name("propertyid") == "propertyid"
-    assert _normalize_element_name("eigenschaftsidentifikator") == "eigenschaftsidentifikator"
+    assert (
+        _normalize_element_name("eigenschaftsidentifikator")
+        == "eigenschaftsidentifikator"
+    )

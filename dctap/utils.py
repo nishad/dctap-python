@@ -1,8 +1,57 @@
 """Utilities."""
 
+import sys
 import re
+from pathlib import Path
 from urllib.parse import urlparse
-from .exceptions import ConfigError
+from ruamel.yaml import YAML, YAMLError
+from ruamel.yaml.scanner import ScannerError
+from ruamel.yaml.parser import ParserError
+from dctap.exceptions import ConfigError, DctapError
+
+
+def load_yaml_to_dict(yamlstring=None, yamlfile=None):
+    """Convert YAML from string or file (filename or Path object) into Python dict."""
+    dict_from_yamlstring = {}
+    if yamlfile and yamlstring:
+        raise DctapError("Can load YAML from string or file, but not both.")
+
+    if yamlfile:
+        try:
+            yamlstring = Path(yamlfile).read_text(encoding="UTF-8")
+        except FileNotFoundError:
+            print(f"File '{yamlfile}' not found.", file=sys.stderr)
+
+    if yamlstring is not None:
+        yaml = YAML(typ="safe", pure=True)
+        try:
+            dict_from_yamlstring = yaml.load(yamlstring)
+        except (YAMLError, ScannerError, ParserError):
+            dict_from_yamlstring = None
+            if yamlfile:
+                print(f"YAML in '{yamlfile}' is badly formed.", file=sys.stderr)
+            else:
+                print("YAML is badly formed.", file=sys.stderr)
+
+    return dict_from_yamlstring
+
+
+def coerce_concise(some_str=None):
+    """
+    For given string:
+    - delete spaces, underscores, dashes, commas
+    - lowercase
+    - delete surrounding single and double quotes
+    """
+    some_str = some_str.replace(" ", "")
+    some_str = some_str.replace("_", "")
+    some_str = some_str.replace("-", "")
+    some_str = some_str.replace(",", "")
+    some_str = some_str.lower()
+    some_str = some_str.strip('"')
+    some_str = some_str.strip("'")
+    return some_str
+
 
 def coerce_integer(value_constraint=None):
     """Coerces string to integer or returns string untouched."""
@@ -25,29 +74,6 @@ def coerce_numeric(value_constraint=None):
     return value_constraint
 
 
-def strip_enclosing_angle_brackets(url):
-    """Normalize URL by stripping angle brackets."""
-    return url.lstrip("<").rstrip(">")
-
-
-def is_uri(url_string):
-    """True if string is valid as a URL."""
-    try:
-        result = urlparse(url_string)
-        return all([result.scheme, result.netloc])
-    except ValueError:
-        return False
-
-
-def is_uri_or_prefixed_uri(uri):
-    """True if string is URI or superficially looks like a prefixed URI."""
-    if is_uri(uri):
-        return True
-    if re.match("[A-Za-z0-9_]*:[A-Za-z0-9_]*", uri):  # looks like prefixed URI
-        return True
-    return False
-
-
 def expand_uri_prefixes(shapes_dict=None, config_dict=None):
     """Expand namespace prefixes, eg: dc:date to http://purl.org/dc/terms/date."""
     # pylint: disable=too-many-nested-blocks
@@ -66,3 +92,22 @@ def expand_uri_prefixes(shapes_dict=None, config_dict=None):
                             prefix_expanded = config_dict["prefixes"][prefix]
                             sc[element] = re.sub(prefix, prefix_expanded, sc[element])
     return shapes_dict
+
+
+def looks_like_uri_or_curie(url_string):
+    """True if string superficially looks like a URI or Compact URI."""
+    if not isinstance(url_string, str):
+        return False
+
+    url_parsed = urlparse(url_string)
+    has_prefix = bool(url_parsed.scheme)  # could be URI scheme or CURIE prefix
+    has_net_location = bool(url_parsed.netloc)  # something with a dot
+    has_name = bool(re.match(r"^:", url_parsed.path))  # starts with a colon
+
+    if has_prefix and has_net_location:
+        return True
+    if has_prefix:
+        return True
+    if has_name:
+        return True
+    return False
